@@ -572,7 +572,7 @@ namespace Medallion.Collections
 
             public void Increment(T item)
             {
-                int count = this.FindAndCountBucket(item, 1);
+                int count = FindAndCountBucket(item, 1);
 
                 // resize the table if we've grown too full
                 if (count == 1 && this.populatedBucketCount == this.nextResizeCount)
@@ -583,6 +583,7 @@ namespace Medallion.Collections
                     for (var i = 0; i < this.buckets.Length; ++i)
                     {
                         ref var oldBucket = ref this.buckets[i];
+
                         if (oldBucket.HashCode != 0)
                         {
                             var newBucketIndex = oldBucket.HashCode % newBuckets.Length;
@@ -598,7 +599,7 @@ namespace Medallion.Collections
                                 else if (newBucket.Count < oldBucket.Count)
                                 {
                                     // Use count sorting to ensure shortest distance to the most frequently accessed buckets
-                                    Bucket tmpBucket = newBucket;
+                                    var tmpBucket = newBucket;
                                     newBucket = oldBucket;
                                     oldBucket = tmpBucket;
                                 }
@@ -615,7 +616,7 @@ namespace Medallion.Collections
 
             public int Decrement(T item)
             {
-                return this.FindAndCountBucket(item, -1);
+                return FindAndCountBucket(item, -1);
             }
 
             private int FindAndCountBucket(T item, int step)
@@ -625,15 +626,13 @@ namespace Medallion.Collections
                 var rawHashCode = this.comparer.GetHashCode(item);
                 uint hashCode = rawHashCode == 0 ? uint.MaxValue : unchecked((uint)rawHashCode);
 
-                var bestBucketIndex = (int)(hashCode % this.buckets.Length);
-
-                var bucketIndex = bestBucketIndex;
+                var bucketIndex = (int)(hashCode % this.buckets.Length);                
                 var swapIndex = bucketIndex;
-                bool found = false;
+                int? count = null;
 
                 while (true) // guaranteed to terminate because of how we set load factor
                 {
-                    ref var bucket = ref this.buckets[bucketIndex];
+                    ref var bucket = ref this.buckets[bucketIndex];                    
 
                     if (bucket.HashCode == 0)
                     {
@@ -648,7 +647,7 @@ namespace Medallion.Collections
 
                     if (bucket.HashCode == hashCode && this.comparer.Equals(bucket.Value, item))
                     {
-                        int count = bucket.Count += step;
+                        count = bucket.Count += step;
 
                         if (step < 0)
                         {
@@ -664,36 +663,35 @@ namespace Medallion.Collections
                             }
 
                             // Count sorting is more of an overhead while decrementing, so return before ReIndexing
-                            return count;
+                            return bucket.Count;
                         }
-
-                        found = true;
                     }
 
-                    if (step > 0 /* Skip count sorting if decrementing */ && swapIndex != bucketIndex)
+                    if (step > 0)
                     {
-                        switch (Math.Sign(bucket.Count - this.buckets[swapIndex].Count))
+                        if (swapIndex != bucketIndex)
                         {
-                            case 0:
-                                break;
-                            case -1:
-                                // Make the current bucket index the new candidate for a swap, because the bucket with the lowest count is the best candidate
-                                swapIndex = bucketIndex;
-                                break;
-                            default:
-                                // Reindexing only ensures partial count sorting - a rehash ensures full count sorting
-                                if (ReIndex(this.buckets, bucketIndex, swapIndex))
-                                {
-                                    // Set swap candidate to the next bucket. It most likely will have a lower count then the bucket we swapped 
-                                    swapIndex = (swapIndex + 1) % this.buckets.Length;
-                                }
-                                break;
+                            switch (Math.Sign(bucket.Count - this.buckets[swapIndex].Count))
+                            {
+                                case -1:
+                                    // Make the current bucket index the new candidate for a swap, because the bucket with the lowest count is the best candidate
+                                    swapIndex = bucketIndex;
+                                    break;
+                                case 1:
+                                    // Reindexing only ensures partial count sorting - a rehash ensures full count sorting
+                                    if (ReIndex(ref bucket, bucketIndex, swapIndex))
+                                    {
+                                        // Set swap candidate to the next bucket. It most likely will have a lower count then the bucket we swapped 
+                                        swapIndex = (swapIndex + 1) % this.buckets.Length;
+                                    }
+                                    break;
+                            }
                         }
-                    }
 
-                    if (found)
-                    {
-                        return bucket.Count;
+                        if (count.HasValue)
+                        {
+                            return count.Value;
+                        }
                     }
 
                     // otherwise march on to the next adjacent bucket
@@ -702,21 +700,17 @@ namespace Medallion.Collections
             }
 
             /// <summary>
-            /// Swap 2 buckets if the distance from the start of the <paramref name="bucketList"/> to the <paramref name="swapIndex"/> is shorter
-            /// than the distance to the <paramref name="bucketIndex"/> and if the item count in the bucket at <paramref name="bucketIndex"/>
-            /// is larger than the item count in the bucket at <paramref name="swapIndex"/>
+            /// Swap 2 buckets if the distance from the hash entry of the item to the <paramref name="swapIndex"/> is shorter
+            /// than the distance to the <paramref name="bucketIndex"/> 
             /// </summary>
-            /// <param name="bucketList"></param>
             /// <param name="bucketIndex"></param>
             /// <param name="swapIndex"></param>
-            private bool ReIndex(Bucket[] bucketList, int bucketIndex, int swapIndex)
+            private bool ReIndex(ref Bucket bucket, int bucketIndex, int swapIndex)
             {
-                ref var bucket = ref bucketList[bucketIndex];
-
                 var startBucketIndex = (int)(bucket.HashCode % this.buckets.Length);
 
-                int oldDistance = bucketIndex - startBucketIndex;
-                int newDistance = swapIndex - startBucketIndex;
+                var oldDistance = bucketIndex - startBucketIndex;
+                var newDistance = swapIndex - startBucketIndex;
                 if (oldDistance < 0)
                 {
                     oldDistance += this.buckets.Length;
@@ -728,14 +722,15 @@ namespace Medallion.Collections
 
                 if (newDistance < oldDistance)
                 {
-                    ref var swapBucket = ref bucketList[swapIndex];
+                    ref var swapBucket = ref this.buckets[swapIndex];
 
-                    Bucket tmpBucket = bucket;
+                    var tmpBucket = bucket;
                     bucket = swapBucket;
                     swapBucket = tmpBucket;
 
                     return true;
                 }
+
                 return false;
             }
 
