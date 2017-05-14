@@ -168,7 +168,7 @@ namespace Medallion.Collections
 
             results.Add("sequence equal", ComparisonProfile(Enumerable.Range(0, 1000), Enumerable.Range(0, 1000)));
 
-            results.Add("mostly sequence equal", ComparisonProfile(Enumerable.Range(0, 1000).Append(int.MaxValue), Enumerable.Range(0, 1000).Append(int.MaxValue)));
+            results.Add("mostly sequence equal", ComparisonProfile(Enumerable.Range(0, 1000).Append(int.MaxValue), Enumerable.Range(0, 1000).Append(int.MinValue)));
 
             results.Add("equal out of order", ComparisonProfile(Enumerable.Range(0, 1000), Enumerable.Range(0, 1000).OrderByDescending(i => i).ToArray()));
 
@@ -176,12 +176,20 @@ namespace Medallion.Collections
                 .ToArray();
             results.Add("strings equal out of order", ComparisonProfile(strings, strings.Reverse()));
 
+            results.Add("X-Large sequence - equal out of order with duplicates", ComparisonProfile(Enumerable.Range(0, 100000).Append(Enumerable.Range(0, 25000)).Append(Enumerable.Range(0, 10000)).Append(Enumerable.Range(0, 5000)), Enumerable.Range(0, 100000).Append(Enumerable.Range(0, 25000)).Append(Enumerable.Range(0, 10000)).Append(Enumerable.Range(0, 5000)).Reverse().ToArray()));
+
             foreach (var kvp in results)
             {
                 this.output.WriteLine($"---- {kvp.Key} ----");
 
                 var cer = kvp.Value.CollectionEqualsResult;
                 var dmr = kvp.Value.DictionaryMethodResult;
+
+                if (cer.Fail || dmr.Fail || cer.Result != dmr.Result)
+                {
+                    this.output.WriteLine("INCONSISTENCY IN RESULT");
+                }
+
                 Func<double, double, string> perc = (n, d) => (n / d).ToString("0.0%");
                 this.output.WriteLine($"{perc(cer.Duration.Ticks, dmr.Duration.Ticks)}, {perc(cer.EnumerateCount, dmr.EnumerateCount)} {perc(cer.EqualsCount, dmr.EqualsCount)}, {perc(cer.HashCount, dmr.HashCount)}");
                 this.output.WriteLine($"CollectionEquals: {kvp.Value.CollectionEqualsResult}");
@@ -212,19 +220,23 @@ namespace Medallion.Collections
             var wrappedA = a is IReadOnlyCollection<T> ? new CountingEnumerableCollection<T>((IReadOnlyCollection<T>)a) : new CountingEnumerable<T>(a);
             var wrappedB = b is IReadOnlyCollection<T> ? new CountingEnumerableCollection<T>((IReadOnlyCollection<T>)b) : new CountingEnumerable<T>(b);
             var comparer = new CountingEqualityComparer<T>();
-            equals(wrappedA, wrappedB, comparer);
+            bool result = equals(wrappedA, wrappedB, comparer);
 
             // capture timing stats
             const int Trials = 100;
             var originalThreadPriority = Thread.CurrentThread.Priority;
             try
             {
+                bool fail = false;
                 Thread.CurrentThread.Priority = ThreadPriority.Highest;
 
                 var stopwatch = Stopwatch.StartNew();
                 for (var i = 0; i < Trials; ++i)
                 {
-                    equals(a, b, EqualityComparer<T>.Default);
+                    if(result != equals(a, b, EqualityComparer<T>.Default))
+                    {
+                        fail = true;
+                    }
                 }
 
                 return new ProfilingResult
@@ -233,6 +245,8 @@ namespace Medallion.Collections
                     EnumerateCount = wrappedA.EnumerateCount + wrappedB.EnumerateCount,
                     EqualsCount = comparer.EqualsCount,
                     HashCount = comparer.HashCount,
+                    Result = result,
+                    Fail = fail
                 };
             }
             finally
@@ -254,8 +268,10 @@ namespace Medallion.Collections
             public long EnumerateCount { get; set; }
             public long EqualsCount { get; set; }
             public long HashCount { get; set; }
+            public bool Result { get; set; }
+            public bool Fail { get; set; }
 
-            public override string ToString() => $"Duration={this.Duration}, Enumerate={this.EnumerateCount}, Equals={this.EqualsCount}, Hash={this.HashCount}";
+            public override string ToString() => $"Duration={this.Duration}, Enumerate={this.EnumerateCount}, Equals={this.EqualsCount}, Hash={this.HashCount}, Result={this.Result}, Fail={this.Fail}";
 
             public void AssertBetterThan(ProfilingResult that)
             {
