@@ -550,6 +550,8 @@ namespace Medallion.Collections
         {
             // picked based on observing unit test performance
             private const double MaxLoad = .62;
+            // Might change ... not tweaked yet
+            private const double ItemDistanceThreshold = 1.33;
 
             private readonly IEqualityComparer<T> comparer;
             private Bucket[] buckets;
@@ -559,6 +561,9 @@ namespace Medallion.Collections
             /// </summary>
             private int nextResizeCount;
 
+            private int totalItemDistance;
+            private int totalItemCount;
+
             public CountingSet(IEqualityComparer<T> comparer, int capacity = 0)
             {
                 this.comparer = comparer;
@@ -566,132 +571,99 @@ namespace Medallion.Collections
                 // capacity and then using our standard logic of picking the next valid table size
                 this.buckets = new Bucket[GetNextTableSize((int)(capacity / MaxLoad) - 1)];
                 this.nextResizeCount = this.CalculateNextResizeCount();
+
+                this.totalItemCount = 0;
+                this.totalItemDistance = 0;
             }
 
             public bool IsEmpty { get { return this.populatedBucketCount == 0; } }
 
             public void Increment(T item)
             {
-                int count = FindAndCountBucket(item, 1);
-
-                // resize the table if we've grown too full
-                if (count == 1 && this.populatedBucketCount == this.nextResizeCount)
-                {
-                    var newBuckets = new Bucket[GetNextTableSize(this.buckets.Length)];
-
-                    // rehash
-                    for (var i = 0; i < this.buckets.Length; ++i)
-                    {
-                        ref var oldBucket = ref this.buckets[i];
-
-                        if (oldBucket.HashCode != 0)
-                        {
-                            var newBucketIndex = oldBucket.HashCode % newBuckets.Length;
-                            while (true)
-                            {
-                                ref var newBucket = ref newBuckets[newBucketIndex];
-
-                                if (newBucket.HashCode == 0)
-                                {
-                                    newBucket = oldBucket;
-                                    break;
-                                }
-                                else if (newBucket.Count < oldBucket.Count)
-                                {
-                                    // Use count sorting to ensure shortest distance to the most frequently accessed buckets
-                                    var tmpBucket = newBucket;
-                                    newBucket = oldBucket;
-                                    oldBucket = tmpBucket;
-                                }
-
-                                newBucketIndex = (newBucketIndex + 1) % newBuckets.Length;
-                            }
-                        }
-                    }
-
-                    this.buckets = newBuckets;
-                    this.nextResizeCount = this.CalculateNextResizeCount();
-                }
-            }
-
-            public int Decrement(T item)
-            {
-                return FindAndCountBucket(item, -1);
-            }
-
-            private int FindAndCountBucket(T item, int step)
-            {
                 // we convert the raw hash code to a uint to get correctly-signed mod operations
                 // and get rid of the zero value so that we can use 0 to mean "unoccupied"
                 var rawHashCode = this.comparer.GetHashCode(item);
                 uint hashCode = rawHashCode == 0 ? uint.MaxValue : unchecked((uint)rawHashCode);
 
-                var bucketIndex = (int)(hashCode % this.buckets.Length);                
+                var startIndex = (int)(hashCode % this.buckets.Length);
+                var offset = this.buckets.Length - startIndex;
+                var bucketIndex = startIndex;
                 var swapIndex = bucketIndex;
-                int? count = null;
+                bool found = false;
 
                 while (true) // guaranteed to terminate because of how we set load factor
                 {
-                    ref var bucket = ref this.buckets[bucketIndex];                    
+                    ref var bucket = ref this.buckets[bucketIndex];
 
                     if (bucket.HashCode == 0)
                     {
-                        bucket.Count = step;
+                        bucket.Count = 1;
                         bucket.HashCode = hashCode;
                         bucket.Value = item;
                         ++this.populatedBucketCount;
 
+                        ++this.totalItemCount;
+                        this.totalItemDistance += (bucketIndex + offset) % this.buckets.Length;
+
+                        // resize the table if we've grown too full
+                        if (this.populatedBucketCount == this.nextResizeCount ||
+                            // Or if specific areas of the hash table gets to crowded resulting in an average item distance to grow too high
+                            1.0 * this.totalItemDistance / this.totalItemCount > ItemDistanceThreshold &&
+                            1.0 * this.populatedBucketCount / this.buckets.Length > 0.1 /* put an upper limit to the size of the bucket array */
+                        )
+                        {
+                            Rehash();
+                        }
+
                         // Count sorting is not needed for new buckets. Then should be at the furthest distance. So just return
-                        return step;
+                        return;
                     }
 
                     if (bucket.HashCode == hashCode && this.comparer.Equals(bucket.Value, item))
                     {
-                        count = bucket.Count += step;
+                        ++bucket.Count;
 
-                        if (step < 0)
+                        ++this.totalItemCount;                        
+                        this.totalItemDistance += (bucketIndex + offset) % this.buckets.Length;
+
+                        found = true;
+                    }
+
+                    if (swapIndex != bucketIndex)
+                    {
+                        switch (Math.Sign(bucket.Count - this.buckets[swapIndex].Count))
                         {
-                            if (count == 0)
-                            {
-                                // Note: we can't do this because it messes up our try-find logic
-                                //// mark as unpopulated. Not strictly necessary because CollectionEquals always does all increments
-                                //// before all decrements currently. However, this is very cheap to do and allowing the collection to
-                                //// "just work" in any situation is a nice benefit
-                                //// this.buckets[bucketIndex].HashCode = 0;
+                            case -1:
+                                // Make the current bucket index the new candidate for a swap, because the bucket with the lowest count is the best candidate
+                                swapIndex = bucketIndex;
+                                break;
+                            case 1:
+                                var offsetForSwap = this.buckets.Length - (int)(bucket.HashCode % this.buckets.Length) /* start index*/;
 
-                                --this.populatedBucketCount;
-                            }
+                                var oldDistance = (bucketIndex + offsetForSwap) % this.buckets.Length;
+                                var newDistance = (swapIndex + offsetForSwap) % this.buckets.Length;
 
-                            // Count sorting is more of an overhead while decrementing, so return before ReIndexing
-                            return bucket.Count;
+                                if (newDistance < oldDistance)
+                                {
+                                    ref var swapBucket = ref this.buckets[swapIndex];
+
+                                    this.totalItemDistance += (newDistance - oldDistance) * bucket.Count + (oldDistance - newDistance) * swapBucket.Count;
+
+                                    // Swap 2 buckets if the distance from the hash entry of the item to the swapIndex is shorter
+                                    // than the distance to the bucketIndex
+                                    // Reindexing only ensures partial count sorting - a rehash ensures full count sorting
+
+                                    var tmpBucket = bucket;
+                                    bucket = swapBucket;
+                                    swapBucket = tmpBucket;
+                                }
+                                break;
                         }
                     }
 
-                    if (step > 0)
+                    if (found)
                     {
-                        if (swapIndex != bucketIndex)
-                        {
-                            switch (Math.Sign(bucket.Count - this.buckets[swapIndex].Count))
-                            {
-                                case -1:
-                                    // Make the current bucket index the new candidate for a swap, because the bucket with the lowest count is the best candidate
-                                    swapIndex = bucketIndex;
-                                    break;
-                                case 1:
-                                    // Reindexing only ensures partial count sorting - a rehash ensures full count sorting
-                                    if (ReIndex(ref bucket, bucketIndex, swapIndex))
-                                    {
-                                        // Set swap candidate to the next bucket. It most likely will have a lower count then the bucket we swapped 
-                                        swapIndex = (swapIndex + 1) % this.buckets.Length;
-                                    }
-                                    break;
-                            }
-                        }
-
-                        if (count.HasValue)
-                        {
-                            return count.Value;
-                        }
+                        return;
                     }
 
                     // otherwise march on to the next adjacent bucket
@@ -699,39 +671,89 @@ namespace Medallion.Collections
                 }
             }
 
-            /// <summary>
-            /// Swap 2 buckets if the distance from the hash entry of the item to the <paramref name="swapIndex"/> is shorter
-            /// than the distance to the <paramref name="bucketIndex"/> 
-            /// </summary>
-            /// <param name="bucketIndex"></param>
-            /// <param name="swapIndex"></param>
-            private bool ReIndex(ref Bucket bucket, int bucketIndex, int swapIndex)
+            private void Rehash()
             {
-                var startBucketIndex = (int)(bucket.HashCode % this.buckets.Length);
+                var newBuckets = new Bucket[GetNextTableSize(this.buckets.Length)];
 
-                var oldDistance = bucketIndex - startBucketIndex;
-                var newDistance = swapIndex - startBucketIndex;
-                if (oldDistance < 0)
+                this.totalItemDistance = 0;
+
+                // rehash
+                for (var i = 0; i < this.buckets.Length; ++i)
                 {
-                    oldDistance += this.buckets.Length;
+                    ref var oldBucket = ref this.buckets[i];
+
+                    if (oldBucket.HashCode != 0)
+                    {
+                        var startIndex = (int)(oldBucket.HashCode % newBuckets.Length);
+                        var offset = this.buckets.Length - startIndex /* start index*/;
+                        var newBucketIndex = startIndex;
+
+                        while (true)
+                        {
+                            ref var newBucket = ref newBuckets[newBucketIndex];
+
+                            if (newBucket.HashCode == 0)
+                            {
+                                newBucket = oldBucket;
+                                this.totalItemDistance += newBucket.Count * ((newBucketIndex + offset) % this.buckets.Length);
+                                break;
+                            }
+                            else if (newBucket.Count < oldBucket.Count)
+                            {
+                                this.totalItemDistance += (oldBucket.Count - newBucket.Count) * ((newBucketIndex + offset) % this.buckets.Length);
+
+                                // Use count sorting to ensure shortest distance to the most frequently accessed buckets
+                                var tmpBucket = newBucket;
+                                newBucket = oldBucket;
+                                oldBucket = tmpBucket;
+                            }
+
+                            newBucketIndex = (newBucketIndex + 1) % newBuckets.Length;
+                        }
+                    }
                 }
-                if (newDistance < 0)
+
+                this.buckets = newBuckets;
+                this.nextResizeCount = this.CalculateNextResizeCount();
+            }
+
+            public int Decrement(T item)
+            {
+                // we convert the raw hash code to a uint to get correctly-signed mod operations
+                // and get rid of the zero value so that we can use 0 to mean "unoccupied"
+                var rawHashCode = this.comparer.GetHashCode(item);
+                uint hashCode = rawHashCode == 0 ? uint.MaxValue : unchecked((uint)rawHashCode);
+
+                var bucketIndex = (int)(hashCode % this.buckets.Length);
+
+                while (true) // guaranteed to terminate because of how we set load factor
                 {
-                    newDistance += this.buckets.Length;
+                    ref var bucket = ref this.buckets[bucketIndex];
+
+                    if (bucket.HashCode == 0)
+                    {
+                        return -1;
+                    }
+
+                    if (bucket.HashCode == hashCode && this.comparer.Equals(bucket.Value, item))
+                    {
+                        if (--bucket.Count == 0)
+                        {
+                            // Note: we can't do this because it messes up our try-find logic
+                            //// mark as unpopulated. Not strictly necessary because CollectionEquals always does all increments
+                            //// before all decrements currently. However, this is very cheap to do and allowing the collection to
+                            //// "just work" in any situation is a nice benefit
+                            //// this.buckets[bucketIndex].HashCode = 0;
+
+                            --this.populatedBucketCount;
+                        }
+
+                        return bucket.Count;
+                    }
+
+                    // otherwise march on to the next adjacent bucket
+                    bucketIndex = (bucketIndex + 1) % this.buckets.Length;
                 }
-
-                if (newDistance < oldDistance)
-                {
-                    ref var swapBucket = ref this.buckets[swapIndex];
-
-                    var tmpBucket = bucket;
-                    bucket = swapBucket;
-                    swapBucket = tmpBucket;
-
-                    return true;
-                }
-
-                return false;
             }
 
             private int CalculateNextResizeCount()

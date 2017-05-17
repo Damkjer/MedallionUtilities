@@ -160,23 +160,50 @@ namespace Medallion.Collections
         {
             var results = new Dictionary<string, ComparisonResult>();
 
-            results.Add("arrays of different lengths", ComparisonProfile(Enumerable.Range(0, 1000).ToArray(), Enumerable.Range(0, 1001).ToArray()));
+            results.Add("arrays of different lengths", ComparisonProfile(false, Enumerable.Range(0, 1000).ToArray(), Enumerable.Range(0, 1001).ToArray()));
 
-            results.Add("long array short lazy", ComparisonProfile(Enumerable.Range(0, 1000).Reverse().ToArray(), Enumerable.Range(0, 500)));
+            results.Add("long array short lazy", ComparisonProfile(false, Enumerable.Range(0, 1000).Reverse().ToArray(), Enumerable.Range(0, 500)));
 
-            results.Add("short array long lazy", ComparisonProfile(Enumerable.Range(0, 1000).Reverse(), Enumerable.Range(0, 500).ToArray()));
+            results.Add("short array long lazy", ComparisonProfile(false, Enumerable.Range(0, 1000).Reverse(), Enumerable.Range(0, 500).ToArray()));
 
-            results.Add("sequence equal", ComparisonProfile(Enumerable.Range(0, 1000), Enumerable.Range(0, 1000)));
+            results.Add("sequence equal", ComparisonProfile(true, Enumerable.Range(0, 1000), Enumerable.Range(0, 1000)));
 
-            results.Add("mostly sequence equal", ComparisonProfile(Enumerable.Range(0, 1000).Append(int.MaxValue), Enumerable.Range(0, 1000).Append(int.MinValue)));
+            results.Add("mostly sequence equal", ComparisonProfile(false, Enumerable.Range(0, 1000).Append(int.MaxValue), Enumerable.Range(0, 1000).Append(int.MinValue)));
 
-            results.Add("equal out of order", ComparisonProfile(Enumerable.Range(0, 1000), Enumerable.Range(0, 1000).OrderByDescending(i => i).ToArray()));
+            results.Add("equal out of order", ComparisonProfile(true, Enumerable.Range(0, 1000), Enumerable.Range(0, 1000).OrderByDescending(i => i).ToArray()));
 
             var strings = Enumerable.Range(0, 1000).Select(i => (i + (long)int.MaxValue).ToString("0000000000000000000"))
                 .ToArray();
-            results.Add("strings equal out of order", ComparisonProfile(strings, strings.Reverse()));
+            results.Add("strings equal out of order", ComparisonProfile(true, strings, strings.Reverse()));
 
-            results.Add("X-Large sequence - equal out of order with duplicates", ComparisonProfile(Enumerable.Range(0, 100000).Append(Enumerable.Range(0, 25000)).Append(Enumerable.Range(0, 10000)).Append(Enumerable.Range(0, 5000)), Enumerable.Range(0, 100000).Append(Enumerable.Range(0, 25000)).Append(Enumerable.Range(0, 10000)).Append(Enumerable.Range(0, 5000)).Reverse().ToArray()));
+            //results.Add("Large long array short lazy", ComparisonProfile(false, Enumerable.Range(0, 10000).Reverse().ToArray(), Enumerable.Range(0, 5000)));
+
+            //results.Add("Large short array long lazy", ComparisonProfile(false, Enumerable.Range(0, 10000).Reverse(), Enumerable.Range(0, 5000).ToArray()));
+
+            //results.Add("Large sequence equal", ComparisonProfile(true, Enumerable.Range(0, 10000), Enumerable.Range(0, 10000)));
+
+            //results.Add("Large mostly sequence equal", ComparisonProfile(false, Enumerable.Range(0, 10000).Append(int.MaxValue), Enumerable.Range(0, 10000).Append(int.MinValue)));
+
+            //results.Add("Large equal out of order", ComparisonProfile(true, Enumerable.Range(0, 10000), Enumerable.Range(0, 10000).OrderByDescending(i => i).ToArray()));
+
+            strings = Enumerable.Range(0, 10000).Select(i => (i + (long)int.MaxValue).ToString("0000000000000000000"))
+                .ToArray();
+            results.Add("Large strings equal out of order", ComparisonProfile(true, strings, strings.Reverse()));
+
+            var lstrings = strings.Append(strings.Take(5000)).Append(strings.Take(2000)).Append(strings.Take(1000)).Append(strings.Take(500)).Append(strings.Take(100)).Append(strings.Take(10))
+                .ToArray();
+            results.Add("Large string collection equal out of order with duplicates", ComparisonProfile(true, lstrings, lstrings.Reverse()));
+
+            /* This test could fail in the old implementation */
+            var xlsequence = Enumerable.Range(0, 100000).Append(Enumerable.Range(0, 25000)).Append(Enumerable.Range(0, 10000)).Append(Enumerable.Range(0, 5000)).ToArray();
+            results.Add("X-Large sequence - equal out of order with duplicates", ComparisonProfile(true, xlsequence.Where(_ => true), xlsequence.Reverse()));
+
+            /* This test might even fail in the new implementation */
+            //strings = Enumerable.Range(0, 50000).Select(i => (i + (long)int.MaxValue).ToString("0000000000000000000"))
+            //    .ToArray();
+            //var xlstrings = strings.Append(strings.Take(25000)).Append(strings.Take(15000)).Append(strings.Take(10000)).Append(strings.Take(5000)).Append(strings.Take(1000)).Append(strings.Take(100))
+            //    .ToArray();
+            //results.Add("X-Large string collection equal out of order with duplicates", ComparisonProfile(true, xlstrings.Where(_ => true), xlstrings.Reverse()));
 
             foreach (var kvp in results)
             {
@@ -201,17 +228,18 @@ namespace Medallion.Collections
             }
         }
 
-        private static ComparisonResult ComparisonProfile<T>(IEnumerable<T> a, IEnumerable<T> b)
+        private static ComparisonResult ComparisonProfile<T>(bool expectedResult, IEnumerable<T> a, IEnumerable<T> b)
         {
             return new ComparisonResult
             {
-                CollectionEqualsResult = Profile(a, b, CollectionHelper.CollectionEquals),
-                DictionaryMethodResult = Profile(a, b, DictionaryBasedEquals),
+                CollectionEqualsResult = Profile(expectedResult, a, b, CollectionHelper.CollectionEquals),
+                DictionaryMethodResult = Profile(expectedResult, a, b, DictionaryBasedEquals),
                 //SortMethodResult = Profile(a, b, SortBasedEquals),
             };
         }
 
         private static ProfilingResult Profile<T>(
+            bool expectedResult,
             IEnumerable<T> a,
             IEnumerable<T> b,
             Func<IEnumerable<T>, IEnumerable<T>, IEqualityComparer<T>, bool> equals)
@@ -221,19 +249,24 @@ namespace Medallion.Collections
             var wrappedB = b is IReadOnlyCollection<T> ? new CountingEnumerableCollection<T>((IReadOnlyCollection<T>)b) : new CountingEnumerable<T>(b);
             var comparer = new CountingEqualityComparer<T>();
             bool result = equals(wrappedA, wrappedB, comparer);
+            bool fail = false;
+
+            if (expectedResult != result)
+            {
+                fail = true;
+            }
 
             // capture timing stats
             const int Trials = 100;
             var originalThreadPriority = Thread.CurrentThread.Priority;
             try
             {
-                bool fail = false;
                 Thread.CurrentThread.Priority = ThreadPriority.Highest;
 
                 var stopwatch = Stopwatch.StartNew();
                 for (var i = 0; i < Trials; ++i)
                 {
-                    if(result != equals(a, b, EqualityComparer<T>.Default))
+                    if(expectedResult != equals(a, b, EqualityComparer<T>.Default))
                     {
                         fail = true;
                     }
@@ -271,7 +304,7 @@ namespace Medallion.Collections
             public bool Result { get; set; }
             public bool Fail { get; set; }
 
-            public override string ToString() => $"Duration={this.Duration}, Enumerate={this.EnumerateCount}, Equals={this.EqualsCount}, Hash={this.HashCount}, Result={this.Result}, Fail={this.Fail}";
+            public override string ToString() => $"Duration={this.Duration}, Enumerate={this.EnumerateCount}, Equals={this.EqualsCount}, Hash={this.HashCount}, Result={this.Result}";
 
             public void AssertBetterThan(ProfilingResult that)
             {
@@ -285,6 +318,7 @@ namespace Medallion.Collections
                 var hashScore = this.HashCount.CompareTo(that.HashCount);
 
                 var scores = new[] { durationScore, enumerateScore, equalsScore, hashScore };
+
                 Assert.True(scores.All(i => i <= 0), "Scores: " + string.Join(", ", scores));
                 Assert.True(scores.Any(i => i < 0), "Scores: " + string.Join(", ", scores));
             }
