@@ -551,7 +551,7 @@ namespace Medallion.Collections
             // picked based on observing unit test performance
             private const double MaxLoad = .62;
             // Might change ... not tweaked yet
-            private const double ItemDistanceThreshold = 1.33;
+            private const double ItemDistanceThreshold = 2.7;
 
             private readonly IEqualityComparer<T> comparer;
             private Bucket[] buckets;
@@ -576,7 +576,20 @@ namespace Medallion.Collections
                 this.totalItemDistance = 0;
             }
 
-            public bool IsEmpty { get { return this.populatedBucketCount == 0; } }
+            public bool IsEmpty
+            {
+                get
+                {
+#if DEBUG
+                    if (this.populatedBucketCount == 0 && (this.totalItemCount != 0 || this.totalItemDistance != 0) ||
+                        this.populatedBucketCount != 0 && (this.totalItemCount == 0 || this.totalItemDistance == 0))
+                    {
+                        Debug.Assert(false,"Inconsistent count values");
+                    }
+#endif
+                    return this.populatedBucketCount == 0;
+                }
+            }
 
             public void Increment(T item)
             {
@@ -585,9 +598,8 @@ namespace Medallion.Collections
                 var rawHashCode = this.comparer.GetHashCode(item);
                 uint hashCode = rawHashCode == 0 ? uint.MaxValue : unchecked((uint)rawHashCode);
 
-                var startIndex = (int)(hashCode % this.buckets.Length);
-                var offset = this.buckets.Length - startIndex;
-                var bucketIndex = startIndex;
+                var bucketIndex = (int)(hashCode % this.buckets.Length);
+                var offset = this.buckets.Length - bucketIndex /* start index */;
                 var swapIndex = bucketIndex;
                 bool found = false;
 
@@ -603,7 +615,7 @@ namespace Medallion.Collections
                         ++this.populatedBucketCount;
 
                         ++this.totalItemCount;
-                        this.totalItemDistance += (bucketIndex + offset) % this.buckets.Length;
+                        this.totalItemDistance += ((bucketIndex + offset) % this.buckets.Length) + 1;
 
                         // resize the table if we've grown too full
                         if (this.populatedBucketCount == this.nextResizeCount ||
@@ -624,7 +636,7 @@ namespace Medallion.Collections
                         ++bucket.Count;
 
                         ++this.totalItemCount;                        
-                        this.totalItemDistance += (bucketIndex + offset) % this.buckets.Length;
+                        this.totalItemDistance += ((bucketIndex + offset) % this.buckets.Length) + 1;
 
                         found = true;
                     }
@@ -645,9 +657,15 @@ namespace Medallion.Collections
 
                                 if (newDistance < oldDistance)
                                 {
+                                    this.totalItemDistance += (newDistance - oldDistance) * bucket.Count;
+
                                     ref var swapBucket = ref this.buckets[swapIndex];
 
-                                    this.totalItemDistance += (newDistance - oldDistance) * bucket.Count + (oldDistance - newDistance) * swapBucket.Count;
+                                    offsetForSwap = this.buckets.Length - (int)(swapBucket.HashCode % this.buckets.Length) /* start index*/;
+                                    oldDistance = (swapIndex + offsetForSwap) % this.buckets.Length;
+                                    newDistance = (bucketIndex + offsetForSwap) % this.buckets.Length;
+
+                                    this.totalItemDistance += (newDistance - oldDistance) * swapBucket.Count;
 
                                     // Swap 2 buckets if the distance from the hash entry of the item to the swapIndex is shorter
                                     // than the distance to the bucketIndex
@@ -656,6 +674,9 @@ namespace Medallion.Collections
                                     var tmpBucket = bucket;
                                     bucket = swapBucket;
                                     swapBucket = tmpBucket;
+
+                                    // Set swap candidate to the next bucket. It most likely will have a lower count then the bucket we swapped 
+                                    swapIndex = (swapIndex + 1) % this.buckets.Length;
                                 }
                                 break;
                         }
@@ -673,7 +694,7 @@ namespace Medallion.Collections
 
             private void Rehash()
             {
-                var newBuckets = new Bucket[GetNextTableSize(this.buckets.Length)];
+                var newBuckets = new Bucket[GetNextTableSize((int)(this.buckets.Length))]; // * Math.Max(1.0, (1.0 * this.totalItemDistance / this.totalItemCount) - 1.0)))];
 
                 this.totalItemDistance = 0;
 
@@ -684,9 +705,8 @@ namespace Medallion.Collections
 
                     if (oldBucket.HashCode != 0)
                     {
-                        var startIndex = (int)(oldBucket.HashCode % newBuckets.Length);
-                        var offset = this.buckets.Length - startIndex /* start index*/;
-                        var newBucketIndex = startIndex;
+                        var newBucketIndex = (int)(oldBucket.HashCode % newBuckets.Length);
+                        var offset = this.buckets.Length - newBucketIndex /* start index*/;
 
                         while (true)
                         {
@@ -695,17 +715,20 @@ namespace Medallion.Collections
                             if (newBucket.HashCode == 0)
                             {
                                 newBucket = oldBucket;
-                                this.totalItemDistance += newBucket.Count * ((newBucketIndex + offset) % this.buckets.Length);
+                                this.totalItemDistance += newBucket.Count * (((newBucketIndex + offset) % this.buckets.Length) + 1);
                                 break;
                             }
                             else if (newBucket.Count < oldBucket.Count)
                             {
-                                this.totalItemDistance += (oldBucket.Count - newBucket.Count) * ((newBucketIndex + offset) % this.buckets.Length);
+                                this.totalItemDistance += oldBucket.Count * (((newBucketIndex + offset) % this.buckets.Length) + 1);
 
                                 // Use count sorting to ensure shortest distance to the most frequently accessed buckets
                                 var tmpBucket = newBucket;
                                 newBucket = oldBucket;
                                 oldBucket = tmpBucket;
+
+                                offset = this.buckets.Length - (int)(oldBucket.HashCode % newBuckets.Length) /* start index*/;
+                                this.totalItemDistance -= oldBucket.Count * (((newBucketIndex + offset) % this.buckets.Length) + 1);
                             }
 
                             newBucketIndex = (newBucketIndex + 1) % newBuckets.Length;
@@ -715,6 +738,12 @@ namespace Medallion.Collections
 
                 this.buckets = newBuckets;
                 this.nextResizeCount = this.CalculateNextResizeCount();
+#if DEBUG
+                if (1.0 * this.totalItemDistance / this.totalItemCount > ItemDistanceThreshold)
+                {
+                   // Debug.Assert(false, "Rehas did not fix distribution issue!");
+                }
+#endif
             }
 
             public int Decrement(T item)
@@ -724,8 +753,13 @@ namespace Medallion.Collections
                 var rawHashCode = this.comparer.GetHashCode(item);
                 uint hashCode = rawHashCode == 0 ? uint.MaxValue : unchecked((uint)rawHashCode);
 
+#if DEBUG
+                var startIndex = (int)(hashCode % this.buckets.Length);
+                var offset = this.buckets.Length - startIndex;
+                var bucketIndex = startIndex;
+#else
                 var bucketIndex = (int)(hashCode % this.buckets.Length);
-
+#endif
                 while (true) // guaranteed to terminate because of how we set load factor
                 {
                     ref var bucket = ref this.buckets[bucketIndex];
@@ -747,6 +781,11 @@ namespace Medallion.Collections
 
                             --this.populatedBucketCount;
                         }
+
+#if DEBUG
+                        --this.totalItemCount;
+                        this.totalItemDistance -= ((bucketIndex + offset) % this.buckets.Length) + 1;
+#endif
 
                         return bucket.Count;
                     }
@@ -793,9 +832,9 @@ namespace Medallion.Collections
                 internal int Count;
             }
         }
-        #endregion
+#endregion
 
-        #region ---- GetOrAdd ----
+#region ---- GetOrAdd ----
         /// <summary>
         /// If <paramref name="key"/> exists in <paramref name="dictionary"/>, returns the associated value. Otherwise,
         /// generates a new value by applying <paramref name="valueFactory"/> to the given <paramref name="key"/>. The 
@@ -816,7 +855,7 @@ namespace Medallion.Collections
             dictionary.Add(key, value);
             return value;
         }
-        #endregion
+#endregion
 
         private static bool TryFastCount<T>(IEnumerable<T> @this, out int count)
         {
