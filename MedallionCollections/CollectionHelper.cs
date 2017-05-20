@@ -549,9 +549,8 @@ namespace Medallion.Collections
         private sealed class CountingSet<T>
         {
             // picked based on observing unit test performance
-            private const double MaxLoad = .62;
-            // Might change ... not tweaked yet
-            private const double ItemDistanceThreshold = 2.7;
+            private const int MaxLoadPct = 62;
+            private const int ItemDistanceThresholdPct = 220;
 
             private readonly IEqualityComparer<T> comparer;
             private Bucket[] buckets;
@@ -569,7 +568,7 @@ namespace Medallion.Collections
                 this.comparer = comparer;
                 // we pick the initial length by assuming our current table is one short of the desired
                 // capacity and then using our standard logic of picking the next valid table size
-                this.buckets = new Bucket[GetNextTableSize((int)(capacity / MaxLoad) - 1)];
+                this.buckets = new Bucket[GetNextTableSize(100 * capacity / MaxLoadPct - 1)];
                 this.nextResizeCount = this.CalculateNextResizeCount();
 
                 this.totalItemCount = 0;
@@ -582,7 +581,8 @@ namespace Medallion.Collections
                 {
 #if DEBUG
                     if (this.populatedBucketCount == 0 && (this.totalItemCount != 0 || this.totalItemDistance != 0) ||
-                        this.populatedBucketCount != 0 && (this.totalItemCount == 0 || this.totalItemDistance == 0))
+                        this.populatedBucketCount != 0 && (this.totalItemCount == 0 || this.totalItemDistance == 0) ||
+                        this.populatedBucketCount < 0 || this.totalItemCount < 0 || this.totalItemDistance < 0)
                     {
                         Debug.Assert(false,"Inconsistent count values");
                     }
@@ -599,8 +599,8 @@ namespace Medallion.Collections
                 uint hashCode = rawHashCode == 0 ? uint.MaxValue : unchecked((uint)rawHashCode);
 
                 var bucketIndex = (int)(hashCode % this.buckets.Length);
-                var offset = this.buckets.Length - bucketIndex /* start index */;
                 var swapIndex = bucketIndex;
+                var bucketDistance = 1;
                 bool found = false;
 
                 while (true) // guaranteed to terminate because of how we set load factor
@@ -615,13 +615,13 @@ namespace Medallion.Collections
                         ++this.populatedBucketCount;
 
                         ++this.totalItemCount;
-                        this.totalItemDistance += ((bucketIndex + offset) % this.buckets.Length) + 1;
+                        this.totalItemDistance += bucketDistance;
 
                         // resize the table if we've grown too full
                         if (this.populatedBucketCount == this.nextResizeCount ||
                             // Or if specific areas of the hash table gets to crowded resulting in an average item distance to grow too high
-                            1.0 * this.totalItemDistance / this.totalItemCount > ItemDistanceThreshold &&
-                            1.0 * this.populatedBucketCount / this.buckets.Length > 0.1 /* put an upper limit to the size of the bucket array */
+                            this.totalItemDistance * 100 >= ItemDistanceThresholdPct * this.totalItemCount &&
+                            this.populatedBucketCount * 10 >= this.buckets.Length  /* put an upper limit to the size of the bucket array */
                         )
                         {
                             Rehash();
@@ -636,7 +636,7 @@ namespace Medallion.Collections
                         ++bucket.Count;
 
                         ++this.totalItemCount;                        
-                        this.totalItemDistance += ((bucketIndex + offset) % this.buckets.Length) + 1;
+                        this.totalItemDistance += bucketDistance;
 
                         found = true;
                     }
@@ -689,12 +689,13 @@ namespace Medallion.Collections
 
                     // otherwise march on to the next adjacent bucket
                     bucketIndex = (bucketIndex + 1) % this.buckets.Length;
+                    bucketDistance++;
                 }
             }
 
             private void Rehash()
             {
-                var newBuckets = new Bucket[GetNextTableSize((int)(this.buckets.Length))]; // * Math.Max(1.0, (1.0 * this.totalItemDistance / this.totalItemCount) - 1.0)))];
+                var newBuckets = new Bucket[GetNextTableSize(this.buckets.Length)];
 
                 this.totalItemDistance = 0;
 
@@ -706,7 +707,7 @@ namespace Medallion.Collections
                     if (oldBucket.HashCode != 0)
                     {
                         var newBucketIndex = (int)(oldBucket.HashCode % newBuckets.Length);
-                        var offset = this.buckets.Length - newBucketIndex /* start index*/;
+                        var bucketDistance = oldBucket.Count;
 
                         while (true)
                         {
@@ -715,35 +716,30 @@ namespace Medallion.Collections
                             if (newBucket.HashCode == 0)
                             {
                                 newBucket = oldBucket;
-                                this.totalItemDistance += newBucket.Count * (((newBucketIndex + offset) % this.buckets.Length) + 1);
+                                this.totalItemDistance += bucketDistance;
                                 break;
                             }
                             else if (newBucket.Count < oldBucket.Count)
                             {
-                                this.totalItemDistance += oldBucket.Count * (((newBucketIndex + offset) % this.buckets.Length) + 1);
+                                this.totalItemDistance += bucketDistance;
 
                                 // Use count sorting to ensure shortest distance to the most frequently accessed buckets
                                 var tmpBucket = newBucket;
                                 newBucket = oldBucket;
                                 oldBucket = tmpBucket;
 
-                                offset = this.buckets.Length - (int)(oldBucket.HashCode % newBuckets.Length) /* start index*/;
-                                this.totalItemDistance -= oldBucket.Count * (((newBucketIndex + offset) % this.buckets.Length) + 1);
+                                /* Only add the missing distance when inserting the swapped bucket */
+                                bucketDistance = 0;
                             }
 
                             newBucketIndex = (newBucketIndex + 1) % newBuckets.Length;
+                            bucketDistance += oldBucket.Count;
                         }
                     }
                 }
 
                 this.buckets = newBuckets;
                 this.nextResizeCount = this.CalculateNextResizeCount();
-#if DEBUG
-                if (1.0 * this.totalItemDistance / this.totalItemCount > ItemDistanceThreshold)
-                {
-                   // Debug.Assert(false, "Rehas did not fix distribution issue!");
-                }
-#endif
             }
 
             public int Decrement(T item)
@@ -797,7 +793,7 @@ namespace Medallion.Collections
 
             private int CalculateNextResizeCount()
             {
-                return (int)(MaxLoad * this.buckets.Length) + 1;
+                return MaxLoadPct * this.buckets.Length / 100 + 1;
             }
 
             private static readonly int[] HashTableSizes = new[]
