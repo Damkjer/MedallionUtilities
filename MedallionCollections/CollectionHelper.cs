@@ -551,6 +551,8 @@ namespace Medallion.Collections
             // picked based on observing unit test performance
             private const int MaxLoadPct = 62;
             private const int ItemDistanceThresholdPct = 220;
+            private const int DefaultTableSizeIndex = 4; // 389
+            private const int MaxHashTableSize = int.MaxValue;
 
             private readonly IEqualityComparer<T> comparer;
             private Bucket[] buckets;
@@ -563,17 +565,23 @@ namespace Medallion.Collections
             private int totalItemDistance;
             private int totalItemCount;
 
+            private int tableSizeIndex;
+
             public CountingSet(IEqualityComparer<T> comparer, int capacity = int.MinValue)
             {
                 this.comparer = comparer;
                 if (capacity < 0)
                 {
-                    capacity = 128;
+                    this.tableSizeIndex = DefaultTableSizeIndex;
+                }
+                else
+                {
+                    this.tableSizeIndex = GetTableSizeIndex(100 * capacity / MaxLoadPct - 1);
                 }
 
                 // we pick the initial length by assuming our current table is one short of the desired
                 // capacity and then using our standard logic of picking the next valid table size
-                this.buckets = new Bucket[GetNextTableSize(100 * capacity / MaxLoadPct - 1)];
+                this.buckets = new Bucket[HashTableSizes[this.tableSizeIndex]];
                 this.nextResizeCount = this.CalculateNextResizeCount();
 
                 this.totalItemCount = 0;
@@ -671,13 +679,29 @@ namespace Medallion.Collections
                                     break;
                                 }
 
-                                var offsetForSwap = this.buckets.Length - startIndex;
+                                int deltaDistance;
+                                /* old distance */
+                                if (bucketIndex > startIndex)
+                                {
+                                    deltaDistance = bucketIndex - startIndex;
+                                }
+                                else
+                                {
+                                    deltaDistance = bucketIndex - startIndex + this.buckets.Length;
+                                }
 
-                                var deltaDistance = /* old distance */ ((bucketIndex + offsetForSwap) % this.buckets.Length) /* + 1 */;
                                 if (swapIndex != startIndex)
                                 {
+                                    /* new distance */
                                     // if swapIndex == startIndex then new distance is 0
-                                    deltaDistance -= /* new distance */ ((swapIndex + offsetForSwap) % this.buckets.Length) /* + 1 */;
+                                    if (swapIndex > startIndex)
+                                    {
+                                        deltaDistance -= swapIndex - startIndex;
+                                    }
+                                    else
+                                    {
+                                        deltaDistance -= swapIndex - startIndex + this.buckets.Length;
+                                    }
                                 }
 
                                 if (deltaDistance > 0)
@@ -695,7 +719,10 @@ namespace Medallion.Collections
                                     swapBucket = tmpBucket;
 
                                     // Set swap candidate to the next bucket. It most likely will have a lower count then the bucket we swapped 
-                                    swapIndex = (swapIndex + 1) % this.buckets.Length;
+                                    if (++swapIndex == this.buckets.Length)
+                                    {
+                                        swapIndex = 0;
+                                    }
                                 }
                                 break;
                         }
@@ -707,14 +734,28 @@ namespace Medallion.Collections
                     }
 
                     // otherwise march on to the next adjacent bucket
-                    bucketIndex = (bucketIndex + 1) % this.buckets.Length;
+                    if (++bucketIndex == this.buckets.Length)
+                    {
+                        bucketIndex = 0;
+                    }
                     bucketDistance++;
                 }
             }
 
             private void Rehash()
             {
-                var newBuckets = new Bucket[GetNextTableSize(this.buckets.Length)];
+                if (this.buckets.Length >= MaxHashTableSize)
+                {
+                    if (this.populatedBucketCount >= MaxHashTableSize)
+                    {
+                        throw new InvalidOperationException("Hash table is full and cannot grow further!");
+                    }
+
+                    // Array cannot be resized further
+                    return;
+                }
+
+                var newBuckets = new Bucket[HashTableSizes[++this.tableSizeIndex]];
 
                 this.totalItemDistance = 0;
 
@@ -752,7 +793,10 @@ namespace Medallion.Collections
                                 bucketDistance = 0;
                             }
 
-                            newBucketIndex = (newBucketIndex + 1) % newBuckets.Length;
+                            if (++newBucketIndex == newBuckets.Length)
+                            {
+                                newBucketIndex = 0;
+                            }
                             bucketDistance += oldBucket.Count;
                         }
                     }
@@ -807,13 +851,16 @@ namespace Medallion.Collections
                     }
 
                     // otherwise march on to the next adjacent bucket
-                    bucketIndex = (bucketIndex + 1) % this.buckets.Length;
+                    if (++bucketIndex == this.buckets.Length)
+                    {
+                        bucketIndex = 0;
+                    }
                 }
             }
 
             private int CalculateNextResizeCount()
             {
-                return this.buckets.Length == int.MaxValue ? -1 : MaxLoadPct * this.buckets.Length / 100 + 1;
+                return this.buckets.Length >= MaxHashTableSize ? MaxHashTableSize : MaxLoadPct * this.buckets.Length / 100 + 1;
             }
 
             private static readonly int[] HashTableSizes = new[]
@@ -828,15 +875,16 @@ namespace Medallion.Collections
                 1879048201, 2147483629, int.MaxValue
             };
 
-            private static int GetNextTableSize(int currentSize)
+            private static int GetTableSizeIndex(int currentSize)
             {
                 for (var i = 0; i < HashTableSizes.Length; ++i)
                 {
                     var nextSize = HashTableSizes[i];
-                    if (nextSize > currentSize) { return nextSize; }
+                    if (nextSize > currentSize)
+                    { return i; }
                 }
 
-                throw new InvalidOperationException("Hash table cannot expand further");
+                return HashTableSizes.Length - 1;
             }
 
             [DebuggerDisplay("{Value}, {Count}, {HashCode}")]
