@@ -94,6 +94,24 @@ namespace Medallion.Collections
             shorter.CollectionEquals(longerButThrows).ShouldEqual(false);
         }
 
+        [Fact]
+        public void TestSortedSets()
+        {
+            new SortedSet<int?>() { 1, 2, 3, 4, null }.CollectionEquals(new SortedSet<int?>() { 1, 2, 3, 4, null }).ShouldEqual(true);
+            new SortedSet<int?>() { 1, 2, 3, 4, null }.CollectionEquals(new SortedSet<int?>() { null, 2, 3, 1, 5 }).ShouldEqual(false);
+        }
+
+        [Fact]
+        public void TestReferenceEquals()
+        {
+            var comparer = new CountingEqualityComparer<string>();
+            var collection = new[] { "a", "b" };
+
+            collection.CollectionEquals(collection, comparer).ShouldEqual(true);
+            Assert.Equal(0, comparer.EqualsCount);
+            Assert.Equal(0, comparer.HashCount);
+        }
+
         // TODO we could add more explicit case tests to get full coverage of all branches, but
         // for now we do get that via fuzz test
 

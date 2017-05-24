@@ -429,6 +429,23 @@ namespace Medallion.Collections
 
                     if (!cmp.Equals(thisEnumerator.Current, thatEnumerator.Current))
                     {
+                        // Special case
+                        if (@this is SortedSet<TElement> thisSorted && that is SortedSet<TElement> thatSorted)
+                        {
+                            if (cmp.Equals(EqualityComparer<TElement>.Default) && 
+                                (
+                                    thisSorted.Comparer.Equals(thatSorted.Comparer) ||
+                                    Math.Sign(thisSorted.Comparer.Compare(thisEnumerator.Current, thatEnumerator.Current)) ==
+                                    Math.Sign(thatSorted.Comparer.Compare(thisEnumerator.Current, thatEnumerator.Current))
+                                )
+                            )
+                            {
+                                // If to sorted collections, are sorted the same way, then we know 
+                                // the collections dont match
+                                return false;
+                            }
+                        }
+
                         break; // prefixes were not equal
                     }
                 }
