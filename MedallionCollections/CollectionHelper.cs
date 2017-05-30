@@ -433,14 +433,14 @@ namespace Medallion.Collections
                         if (@this is SortedSet<TElement> thisSorted && that is SortedSet<TElement> thatSorted)
                         {
                             if (cmp.Equals(EqualityComparer<TElement>.Default) && 
-                                (
+                                (                                
                                     thisSorted.Comparer.Equals(thatSorted.Comparer) ||
                                     Math.Sign(thisSorted.Comparer.Compare(thisEnumerator.Current, thatEnumerator.Current)) ==
                                     Math.Sign(thatSorted.Comparer.Compare(thisEnumerator.Current, thatEnumerator.Current))
                                 )
                             )
                             {
-                                // If to sorted collections, are sorted the same way, then we know 
+                                // If two sorted collections, are sorted the same way, then we know 
                                 // the collections dont match
                                 return false;
                             }
@@ -628,7 +628,7 @@ namespace Medallion.Collections
                 var rawHashCode = this.comparer.GetHashCode(item);
                 uint hashCode = rawHashCode == 0 ? uint.MaxValue : unchecked((uint)rawHashCode);
 
-                var bucketIndex = (int)(hashCode % this.buckets.Length);
+                var bucketIndex = hashCode < this.buckets.Length ? (int)hashCode : (int)(hashCode % this.buckets.Length);
                 var swapIndex = bucketIndex;
                 var bucketDistance = 1;
                 bool found = false;
@@ -679,70 +679,7 @@ namespace Medallion.Collections
 
                     if (swapIndex != bucketIndex)
                     {
-                        var count = this.buckets[swapIndex].Count - bucket.Count;
-
-                        switch (Math.Sign(count))
-                        {
-                            case 1:
-                                // Make the current bucket index the new candidate for a swap, because the bucket with the lowest count is the best candidate
-                                swapIndex = bucketIndex;
-                                break;
-                            case -1:
-                                var startIndex = (int)(bucket.HashCode % this.buckets.Length) /* start index*/;
-
-                                if (startIndex == bucketIndex)
-                                {
-                                    // For the common case, fast break
-                                    break;
-                                }
-
-                                int deltaDistance;
-                                /* old distance */
-                                if (bucketIndex > startIndex)
-                                {
-                                    deltaDistance = bucketIndex - startIndex;
-                                }
-                                else
-                                {
-                                    deltaDistance = bucketIndex - startIndex + this.buckets.Length;
-                                }
-
-                                if (swapIndex != startIndex)
-                                {
-                                    /* new distance */
-                                    // if swapIndex == startIndex then new distance is 0
-                                    if (swapIndex > startIndex)
-                                    {
-                                        deltaDistance -= swapIndex - startIndex;
-                                    }
-                                    else
-                                    {
-                                        deltaDistance -= swapIndex - startIndex + this.buckets.Length;
-                                    }
-                                }
-
-                                if (deltaDistance > 0)
-                                {
-                                    this.totalItemDistance += deltaDistance * count;
-
-                                    ref var swapBucket = ref this.buckets[swapIndex];
-
-                                    // Swap 2 buckets if the distance from the hash entry of the item to the swapIndex is shorter
-                                    // than the distance to the bucketIndex
-                                    // Reindexing only ensures partial count sorting - a rehash ensures full count sorting
-
-                                    var tmpBucket = bucket;
-                                    bucket = swapBucket;
-                                    swapBucket = tmpBucket;
-
-                                    // Set swap candidate to the next bucket. It most likely will have a lower count then the bucket we swapped 
-                                    if (++swapIndex == this.buckets.Length)
-                                    {
-                                        swapIndex = 0;
-                                    }
-                                }
-                                break;
-                        }
+                        Swap(bucketIndex, ref swapIndex, ref bucket);
                     }
 
                     if (found)
@@ -756,6 +693,74 @@ namespace Medallion.Collections
                         bucketIndex = 0;
                     }
                     bucketDistance++;
+                }
+            }
+
+            private void Swap(int bucketIndex, ref int swapIndex, ref Bucket bucket)
+            {
+                var count = this.buckets[swapIndex].Count - bucket.Count;
+
+                switch (Math.Sign(count))
+                {
+                    case 1:
+                        // Make the current bucket index the new candidate for a swap, because the bucket with the lowest count is the best candidate
+                        swapIndex = bucketIndex;
+                        break;
+                    case -1:
+                        var startIndex = bucket.HashCode < this.buckets.Length ? (int)bucket.HashCode : (int)(bucket.HashCode % this.buckets.Length) /* start index*/;
+
+                        if (startIndex == bucketIndex)
+                        {
+                            // For the common case, fast break
+                            break;
+                        }
+
+                        int deltaDistance;
+                        /* old distance */
+                        if (bucketIndex > startIndex)
+                        {
+                            deltaDistance = bucketIndex - startIndex;
+                        }
+                        else
+                        {
+                            deltaDistance = bucketIndex - startIndex + this.buckets.Length;
+                        }
+
+                        if (swapIndex != startIndex)
+                        {
+                            /* new distance */
+                            // if swapIndex == startIndex then new distance is 0
+                            if (swapIndex > startIndex)
+                            {
+                                deltaDistance -= swapIndex - startIndex;
+                            }
+                            else
+                            {
+                                deltaDistance -= swapIndex - startIndex + this.buckets.Length;
+                            }
+                        }
+
+                        if (deltaDistance > 0)
+                        {
+                            this.totalItemDistance += deltaDistance * count;
+
+                            ref var swapBucket = ref this.buckets[swapIndex];
+
+                            // Swap 2 buckets if the distance from the hash entry of the item to the swapIndex is shorter
+                            // than the distance to the bucketIndex
+                            // Reindexing only ensures partial count sorting - a rehash ensures full count sorting
+
+                            var tmpBucket = bucket;
+                            bucket = swapBucket;
+                            swapBucket = tmpBucket;
+
+                            // Set swap candidate to the next bucket. It most likely will have a lower count then the bucket we swapped 
+                            if (++swapIndex == this.buckets.Length)
+                            {
+                                swapIndex = 0;
+                            }
+                        }
+                        break;
                 }
             }
 
@@ -783,7 +788,7 @@ namespace Medallion.Collections
 
                     if (oldBucket.HashCode != 0)
                     {
-                        var newBucketIndex = (int)(oldBucket.HashCode % newBuckets.Length);
+                        var newBucketIndex = oldBucket.HashCode < newBuckets.Length ? (int)oldBucket.HashCode : (int)(oldBucket.HashCode % newBuckets.Length);
                         var bucketDistance = oldBucket.Count;
 
                         while (true)
@@ -835,7 +840,7 @@ namespace Medallion.Collections
                 var offset = this.buckets.Length - startIndex;
                 var bucketIndex = startIndex;
 #else
-                var bucketIndex = (int)(hashCode % this.buckets.Length);
+                var bucketIndex = hashCode < this.buckets.Length ? (int)hashCode : (int)(hashCode % this.buckets.Length);
 #endif
                 while (true) // guaranteed to terminate because of how we set load factor
                 {
